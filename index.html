@@ -1,0 +1,160 @@
+html
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Jump and Win</title>
+<style>
+  html, body { margin:0; padding:0; background:#111; overflow:hidden; height:100%; touch-action:manipulation; }
+  canvas { display:block; margin:0 auto; background:#87ceeb; }
+  .btn {
+    position:fixed; right:10px; z-index:10;
+    color:#fff; border:none; border-radius:20px;
+    padding:10px 16px; font-size:16px; font-weight:bold;
+  }
+  #photoBtn { top:10px; background:#ff9800; }
+  #musicBtn { top:58px; background:#4caf50; }
+  #photoInput { display:none; }
+</style>
+</head>
+<body>
+<button id="photoBtn" class="btn">Choose Photo</button>
+<button id="musicBtn" class="btn">Music: ON</button>
+<input type="file" id="photoInput" accept="image/*">
+<canvas id="game"></canvas>
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const photoBtn = document.getElementById('photoBtn');
+const photoInput = document.getElementById('photoInput');
+const musicBtn = document.getElementById('musicBtn');
+
+function resize() {
+  canvas.width = Math.min(window.innerWidth, 500);
+  canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', resize);
+
+const GRAVITY = 0.9;
+const JUMP_POWER = -16;
+let groundY, player, obstacles, speed, score, best, state, frame;
+let playerImg = null;
+
+best = parseInt(localStorage.getItem('ninjaBest') || '0');
+
+// ---- Photo feature ----
+photoBtn.addEventListener('click', () => photoInput.click());
+photoInput.addEventListener('change', () => {
+  const file = photoInput.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    const img = new Image();
+    img.onload = () => { playerImg = img; };
+    img.src = reader.result;
+  };
+  reader.readAsDataURL(file);
+});
+
+// ---- Vibration (works on most Android phones in Chrome) ----
+function buzz(ms) {
+  if (navigator.vibrate) navigator.vibrate(ms);
+}
+
+// ---- Sound: jazzy guitar-style music + effects ----
+let audioCtx = null;
+let musicOn = true;
+let musicTimer = null;
+let stepIndex = 0;
+
+function getAudio() {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+  return audioCtx;
+}
+
+// A plucked string: triangle wave with a fast attack and a gentle decay
+function pluck(freq, when, dur, vol) {
+  const ac = getAudio();
+  const osc = ac.createOscillator();
+  const gain = ac.createGain();
+  osc.type = 'triangle';
+  osc.frequency.value = freq;
+  gain.gain.setValueAtTime(0.0001, when);
+  gain.gain.exponentialRampToValueAtTime(vol, when + 0.01);
+  gain.gain.exponentialRampToValueAtTime(0.0001, when + dur);
+  osc.connect(gain);
+  gain.connect(ac.destination);
+  osc.start(when);
+  osc.stop(when + dur + 0.05);
+}
+
+// Jazz progression ii-V-I-vi: Dm7, G7, Cmaj7, Am7
+// Each chord: bass note + four chord tones (Hz)
+const JAZZ = [
+  { bass: 73.42,  tones: [220.00, 261.63, 329.63, 349.23] }, // Dm7
+  { bass: 98.00,  tones: [196.00, 246.94, 293.66, 349.23] }, // G7
+  { bass: 65.41,  tones: [196.00, 246.94, 329.63, 392.00] }, // Cmaj7
+  { bass: 110.00, tones: [196.00, 261.63, 329.63, 392.00] }  // Am7
+];
+// Swing feel: long-short beats. 8 steps per chord.
+// Each step: [what to play, delay until next step in seconds]
+const SWING = [
+  ['bass', 0.34], ['chord', 0.22], ['tone0', 0.34], ['tone2', 0.22],
+  ['bass', 0.34], ['tone1', 0.22], ['tone3', 0.34], ['tone2', 0.22]
+];
+
+function scheduleMusic() {
+  if (!musicOn) return;
+  const ac = getAudio();
+  const chord = JAZZ[Math.floor(stepIndex / SWING.length) % JAZZ.length];
+  const step = SWING[stepIndex % SWING.length];
+  const now = ac.currentTime + 0.05;
+  const what = step[0];
+  if (what === 'bass') {
+    pluck(chord.bass, now, 0.7, 0.28);
+  } else if (what === 'chord') {
+    chord.tones.forEach((f, i) => pluck(f, now + i * 0.015, 0.9, 0.09));
+  } else {
+    const idx = parseInt(what.replace('tone', ''));
+    pluck(chord.tones[idx] * 2, now, 0.6, 0.14);
+  }
+  stepIndex++;
+  musicTimer = setTimeout(scheduleMusic, step[1] * 1000);
+}
+
+function startMusic() {
+  if (musicTimer || !musicOn) return;
+  scheduleMusic();
+}
+function stopMusic() {
+  clearTimeout(musicTimer);
+  musicTimer = null;
+}
+
+musicBtn.addEventListener('click', () => {
+  musicOn = !musicOn;
+  musicBtn.textContent = 'Music: ' + (musicOn ? 'ON' : 'OFF');
+  musicBtn.style.background = musicOn ? '#4caf50' : '#777';
+  if (musicOn) startMusic(); else stopMusic();
+});
+
+function jumpSound() {
+  if (!musicOn) return;
+  const ac = getAudio();
+  pluck(523.25, ac.currentTime, 0.25, 0.25);
+  pluck(659.25, ac.currentTime + 0.06, 0.25, 0.2);
+}
+
+function crashSound() {
+  if (!musicOn) return;
+  const ac = getAudio();
+  pluck(110, ac.currentTime, 0.6, 0.35);
+  pluck(82.41, ac.currentTime + 0.08, 0.7, 0.3);
+}
+
+function reset() {
+  groundY = canvas.height * 0.75;
+  player = { x: 70, y: groundY - 60, w: 60, h: 60, vy: 0, onGround: 
